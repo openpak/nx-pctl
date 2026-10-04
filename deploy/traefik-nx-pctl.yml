@@ -1,0 +1,21 @@
+# Traefik dynamic.yml snippet for nx-pctl -- not applied anywhere. Merge the router and the
+# service into ~/openpak/deploy/traefik/dynamic.yml (tcp: section); the file provider
+# reloads it without a restart. TLS stays passthrough: nx-pctl terminates with OpenPak-CA
+# certificates exactly as nx-baas did. Both names also work through nx-baas's forward
+# (NX_PCTL_URL); listing them takes nx-baas out of their path.
+tcp:
+  routers:
+    nx-pctl:
+      entryPoints: [console]
+      rule: >-
+        HostSNI(`api-lp1.pctl.srv.nintendo.net`) ||
+        HostSNI(`parentalcontrols-movie-lp1.cdn.nintendo.net`)
+      priority: 100
+      service: nx-pctl
+      tls:
+        passthrough: true
+  services:
+    nx-pctl:
+      loadBalancer:
+        servers:
+          - address: "openpak-nx-pctl:21000"

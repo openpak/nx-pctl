@@ -1,0 +1,40 @@
+# Sample quadlet for nx-pctl -- not applied anywhere. Copy to
+# ~/.config/containers/systemd/openpak-nx-pctl.container on the box and fill in the <...>
+# paths from openpak-nx-baas.container (nx-baas docs/service-split.md, "Parental controls
+# cut-over"). Keys go INSIDE [Container]: appended at the end of the file they land in
+# [Install] and are silently ignored.
+[Unit]
+Description=OpenPak nx-pctl (Switch parental controls, split from nx-baas)
+After=openpak-nx-baas.service openpak-nx-penne.service
+
+[Container]
+ContainerName=openpak-nx-pctl
+Image=ghcr.io/openpak/nx-pctl:latest
+AutoUpdate=registry
+Network=openpak
+# The shared env file carries NX_INTERNAL_KEY, WEBSITE_INTERNAL_URL and, after the Penne
+# cut-over, NX_PENNE_URL (without it the push goes through nx-baas's NX_CORE_URL).
+EnvironmentFile=%h/openpak/deploy/.env
+Environment=NX_CORE_URL=http://openpak-nx-baas:20070
+Environment=NX_ADDR=:21000
+Environment=NX_API_ADDR=:20070
+Environment=NX_DATA=/app/data
+Environment=NX_CA_DIR=/ca
+Environment=BAAS_SIGNING_KEY=/keys/baas_signing_key.pem
+# First start only: with no /app/data/pctl.json yet, the records are taken out of nx-baas's
+# baas.json (only the pctlDevices key). Read-only, read once; drop the mount afterwards.
+Environment=NX_PCTL_IMPORT=/import/baas.json
+Volume=openpak-nx-pctl-data:/app/data
+Volume=<nx-baas data dir on the host>:/import:ro
+Volume=%h/openpak/deploy/ca:/ca:ro
+Volume=<the host dir nx-baas mounts at /keys>:/keys:ro
+# The explainer clip, if nx-baas has one configured (PCTL_MOVIE): mount the same file and set
+# the same variable here.
+#Volume=<host path of the clip>:/movie/switchpc.mp4:ro
+#Environment=PCTL_MOVIE=/movie/switchpc.mp4
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target
