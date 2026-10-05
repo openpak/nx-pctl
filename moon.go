@@ -21,6 +21,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -176,6 +177,14 @@ func (s *server) moonSearch(w http.ResponseWriter, r *http.Request) {
 func (s *server) moonDevice(w http.ResponseWriter, r *http.Request, body []byte, device, rest string) {
 	id, tail, _ := strings.Cut(rest, "/")
 	d := s.store.PctlByMoonID(id)
+	if d == nil && r.Method == http.MethodDelete && strings.HasPrefix(tail, "owners/") && device != "" {
+		// A console unlinking deletes every owner it was listed, in its own
+		// order. The record goes with the managing account's owner, so a
+		// further parent's delete after that has nothing left to do.
+		log.Printf("[moon] device %s is gone; owner delete %s answered as done", id, tail)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if d == nil {
 		log.Printf("[moon] device id %q not found (console spelled it that way)", id)
 		moonError(w, moonNotFound)
@@ -255,7 +264,9 @@ func (s *server) moonDevice(w http.ResponseWriter, r *http.Request, body []byte,
 		case http.MethodDelete:
 			// This is how a console unlinks: it lists the owners and deletes
 			// each one, and sends nothing after the last (hardware, v0.43.0).
-			// So a record left with no owner is a console that has left.
+			// So a record left with none of the managing account's owners is
+			// a console that has left; a further parent's id only takes that
+			// parent off.
 			if s.store.PctlRemoveOwner(d.Hex(), na) == 0 {
 				s.store.PctlUnlink(d.Hex())
 				log.Printf("[moon] device %s unlinked: its last owner %s was removed", d.Hex(), na)
@@ -523,10 +534,8 @@ func pctlConform(v, schema any) any {
 // digits, and anything else in either ends the parse as 2142-0234 -- so an owner
 // that is not hex is left out rather than sent.
 //
-// A record nobody has been linked to yet is owned by the account that minted
-// its code: that is who the console is about to be paired with.
-// Every owner carries the managing account's name, since that is the only
-// account behind a record.
+// pctlOwnerList says who they are (the managing account first, then the
+// further parents, each with their own name and picture).
 //
 // The picture is a URL the console downloads (at most 255 bytes), under two
 // keys: 22.5 reads `miiUri.small` (nullable), 23.x reads `iconUri.small` and
@@ -538,28 +547,64 @@ func pctlConform(v, schema any) any {
 // hash (pctlIconOf). It points back at this host so it resolves like every
 // other moon call; host is empty where no console will follow the link.
 func moonOwners(d *PctlDevice, host string) []any {
-	owners := d.Owners
-	if len(owners) == 0 && d.ManagedBy != "" {
-		sum := sha256.Sum256([]byte(d.ManagedBy))
-		owners = []string{hex.EncodeToString(sum[:8])}
-	}
-	name := d.ParentName
-	if name == "" {
-		name = "OpenPak"
-	}
 	out := []any{}
-	for _, na := range owners {
-		if !pctlHexID(na) {
-			continue
-		}
-		user := map[string]any{"nintendoAccountId": na, "nickname": name}
-		if link := pctlIconURL(host, d.ManagedBy); link != "" {
+	for _, o := range pctlOwnerList(d) {
+		user := map[string]any{"nintendoAccountId": o.NaID, "nickname": o.Name}
+		if link := pctlIconURL(host, o.Account); link != "" {
 			icon := map[string]any{"small": link}
 			user["miiUri"], user["iconUri"] = icon, icon
 		}
 		out = append(out, map[string]any{"deviceId": d.Hex(), "user": user})
 	}
 	return out
+}
+
+// pctlMaxOwners is how many parents a console keeps per device: pctl 23.0.1
+// parses at most five owners (.text 0x153850 passes capacity 5) and refuses a
+// GetAllPairingAccountInfos buffer of six or more. 22.5 shows the first.
+const pctlMaxOwners = 5
+
+// pctlOwner is one owner as the console lists it: its NA-shaped id, and the
+// OpenPak account whose name and picture it shows.
+type pctlOwner struct{ NaID, Account, Name string }
+
+// pctlOwnerList is a record's owners, at most pctlMaxOwners, managing account
+// first (it is the owner 22.5 and command 1411 show).
+//
+// A record nobody has been linked to yet is owned by the account that minted
+// its code: that is who the console is about to be paired with. Ids a console
+// linked itself (owners/%016llx) are the managing account's too. Then come the
+// further parents the managing account added, each under its own name and
+// picture. An owner that is not hex would end the parse, so it is left out.
+func pctlOwnerList(d *PctlDevice) []pctlOwner {
+	owners := d.Owners
+	if len(owners) == 0 && d.ManagedBy != "" {
+		owners = []string{pctlNaID(d.ManagedBy)}
+	}
+	out := []pctlOwner{}
+	add := func(na, account, name string) {
+		if len(out) >= pctlMaxOwners || !pctlHexID(na) || slices.ContainsFunc(out, func(o pctlOwner) bool { return o.NaID == na }) {
+			return
+		}
+		if name == "" {
+			name = "OpenPak"
+		}
+		out = append(out, pctlOwner{NaID: na, Account: account, Name: name})
+	}
+	for _, na := range owners {
+		add(na, d.ManagedBy, d.ParentName)
+	}
+	for _, p := range d.Parents {
+		add(pctlNaID(p.AccountID), p.AccountID, p.Name)
+	}
+	return out
+}
+
+// pctlNaID is the Nintendo-Account-shaped id an OpenPak account goes by on a
+// console: sixteen hex digits, stable, and not the account id itself.
+func pctlNaID(account string) string {
+	sum := sha256.Sum256([]byte(account))
+	return hex.EncodeToString(sum[:8])
 }
 
 // pctlIconURL is where the console fetches an account's picture, or "" when
@@ -783,6 +828,11 @@ type PctlDevice struct {
 	// -shaped ids. They are learned when the console links an owner, which is
 	// why a record can be managed by an account and own none yet.
 	Owners []string `json:"owners,omitempty"`
+	// Parents are further OpenPak accounts the managing one made parents of
+	// this console. Each is a console owner of its own, with its own name and
+	// picture (firmware 23.x shows up to pctlMaxOwners); the managing account
+	// is never one of them.
+	Parents []PctlParent `json:"parents,omitempty"`
 	// PairingCode is live until PairingExpires; both are cleared on activation
 	// so a code is good exactly once.
 	PairingCode    string `json:"pairingCode,omitempty"`
@@ -797,6 +847,13 @@ type PctlDevice struct {
 	// it cannot drift from the document it describes.
 	ETag      string `json:"etag,omitempty"`
 	UpdatedAt int64  `json:"updatedAt,omitempty"`
+}
+
+// PctlParent is a further parent of a console: an OpenPak account, and the
+// name the console shows for it.
+type PctlParent struct {
+	AccountID string `json:"accountId"`
+	Name      string `json:"name,omitempty"`
 }
 
 // Hex renders MoonID the way the console's own paths spell it.
@@ -996,13 +1053,74 @@ func (s *Store) PctlNameParent(moonHex, name string) {
 	if d == nil {
 		return
 	}
+	d.ParentName = pctlNickname(name)
+	s.save()
+}
+
+// pctlNickname is a name as the console can hold it: trimmed, and at most the
+// 32 bytes it copies, cut on a rune boundary.
+func pctlNickname(name string) string {
 	name = strings.TrimSpace(name)
 	for len(name) > 32 {
 		_, n := utf8.DecodeLastRuneInString(name)
 		name = name[:len(name)-n]
 	}
-	d.ParentName = name
+	return name
+}
+
+// errPctlOwnersFull is a further parent the console would not keep.
+var errPctlOwnersFull = fmt.Errorf("a console keeps at most %d parents", pctlMaxOwners)
+
+// errPctlManagingParent is the managing account added as a further parent of
+// its own record.
+var errPctlManagingParent = fmt.Errorf("the managing account is already this console's parent")
+
+// PctlSetParent makes account a further parent of a record, or renames it.
+// It reports whether the console's owner list changed.
+func (s *Store) PctlSetParent(moonHex, account, name string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := s.pctlDevices()[moonHex]
+	if d == nil {
+		return false, nil
+	}
+	if account == d.ManagedBy {
+		return false, errPctlManagingParent
+	}
+	name = pctlNickname(name)
+	i := slices.IndexFunc(d.Parents, func(p PctlParent) bool { return p.AccountID == account })
+	switch {
+	case i >= 0 && d.Parents[i].Name == name:
+		return false, nil
+	case i >= 0:
+		d.Parents[i].Name = name
+	case len(pctlOwnerList(d)) >= pctlMaxOwners:
+		return false, errPctlOwnersFull
+	default:
+		d.Parents = append(d.Parents, PctlParent{AccountID: account, Name: name})
+	}
+	d.UpdatedAt = time.Now().Unix()
 	s.save()
+	return true, nil
+}
+
+// PctlRemoveParent takes a further parent off a record, reporting whether it
+// was one.
+func (s *Store) PctlRemoveParent(moonHex, account string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := s.pctlDevices()[moonHex]
+	if d == nil {
+		return false
+	}
+	n := len(d.Parents)
+	d.Parents = slices.DeleteFunc(d.Parents, func(p PctlParent) bool { return p.AccountID == account })
+	if len(d.Parents) == n {
+		return false
+	}
+	d.UpdatedAt = time.Now().Unix()
+	s.save()
+	return true
 }
 
 // PctlByPairingCode answers the console's search. An expired code is not found:
@@ -1174,7 +1292,9 @@ func (s *Store) PctlAddOwner(moonHex, naID string) {
 	s.save()
 }
 
-// PctlRemoveOwner reports how many owners are left.
+// PctlRemoveOwner reports how many of the managing account's owners are left;
+// 0 is a console that has left. A further parent's id takes only that parent
+// off, so it never reads as 0: the managing account is still there.
 func (s *Store) PctlRemoveOwner(moonHex, naID string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1189,8 +1309,13 @@ func (s *Store) PctlRemoveOwner(moonHex, naID string) int {
 		}
 	}
 	d.Owners = kept
+	n := len(d.Parents)
+	d.Parents = slices.DeleteFunc(d.Parents, func(p PctlParent) bool { return pctlNaID(p.AccountID) == naID })
 	d.UpdatedAt = time.Now().Unix()
 	s.save()
+	if len(d.Parents) < n {
+		return max(1, len(kept))
+	}
 	return len(kept)
 }
 
@@ -1610,6 +1735,7 @@ func (s *server) pctlDeviceList(w http.ResponseWriter, r *http.Request) {
 			"activated_at":       d.ActivatedAt,
 			"updated_at":         d.UpdatedAt,
 			"owners":             d.Owners,
+			"parents":            pctlParentList(d),
 			"has_setting":        len(d.Setting) > 0,
 			"nickname":           pctlConsoleName(d),
 			"named":              d.Label != "",
@@ -1633,6 +1759,16 @@ func (s *server) pctlDeviceList(w http.ResponseWriter, r *http.Request) {
 		out = append(out, item)
 	}
 	writeJSON(w, 200, map[string]any{"devices": out})
+}
+
+// pctlParentList is a record's further parents as the parent surface reads
+// them.
+func pctlParentList(d *PctlDevice) []map[string]any {
+	out := []map[string]any{}
+	for _, p := range d.Parents {
+		out = append(out, map[string]any{"account_id": p.AccountID, "display_name": p.Name})
+	}
+	return out
 }
 
 // /internal/pctl/devices/{moon_id}/…?account_id=… is one record, for the account
@@ -1685,9 +1821,46 @@ func (s *server) pctlDeviceRoute(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"days": pctlActivity(s.store.PctlEventList(d.Hex()), days, time.Now())})
 	case len(parts) == 4 && parts[1] == "players" && parts[3] == "image" && r.Method == http.MethodGet:
 		s.pctlPlayerImage(w, d, parts[2])
+	case len(parts) == 3 && parts[1] == "parents" && (r.Method == http.MethodPut || r.Method == http.MethodDelete):
+		s.pctlParentRoute(w, r, d, parts[2])
 	default:
 		apiErr(w, http.StatusNotFound, "not found")
 	}
+}
+
+// PUT …/parents/{account_id} {"display_name"} makes another OpenPak account a
+// parent of the console, or renames it; DELETE takes it off. Only the managing
+// account calls this (pctlDeviceRoute). The console lists each parent as its
+// own owner, under that name and that account's picture.
+func (s *server) pctlParentRoute(w http.ResponseWriter, r *http.Request, d *PctlDevice, account string) {
+	if !pctlAccountID(account) {
+		apiErr(w, http.StatusBadRequest, "account id")
+		return
+	}
+	if r.Method == http.MethodDelete {
+		if s.store.PctlRemoveParent(d.Hex(), account) {
+			log.Printf("[moon] device %s: parent %s removed", d.Hex(), account)
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	var in struct {
+		DisplayName string `json:"display_name"`
+	}
+	json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&in)
+	changed, err := s.store.PctlSetParent(d.Hex(), account, in.DisplayName)
+	switch {
+	case errors.Is(err, errPctlOwnersFull):
+		apiErr(w, http.StatusConflict, err.Error())
+		return
+	case err != nil:
+		apiErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if changed {
+		log.Printf("[moon] device %s: parent %s set", d.Hex(), account)
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // GET …/players/{id}/image -> the player's JPEG, decoded from what the console

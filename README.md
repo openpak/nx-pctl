@@ -10,7 +10,9 @@ It owns:
   and wrong-PIN events; everything else on the host keeps the old service-status answer;
 - `parentalcontrols-movie-<env>.cdn.nintendo.net`: the explainer clip (`PCTL_MOVIE`);
 - `/internal/pctl/*` on the internal listener, which the website's parent screens call:
-  pairing codes, the device list, settings, PIN, names, activity, player pictures;
+  pairing codes, the device list, settings, PIN, names, activity, player pictures, and up to
+  four further parents per console (`PUT/DELETE /internal/pctl/devices/{moon_id}/parents/{account_id}`,
+  each shown to the console as its own owner with its own name and picture);
 - `$NX_DATA/pctl.json`: the records, under the same `pctlDevices` key nx-baas kept them in
   inside `baas.json`.
 
