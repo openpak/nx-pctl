@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -736,12 +737,16 @@ func TestTheOwnerCarriesAPictureLink(t *testing.T) {
 	defer site.Close()
 	t.Setenv("WEBSITE_INTERNAL_URL", site.URL)
 
+	resetPctlIcons(t)
 	s, _ := moonServer(t)
 	d := s.store.PctlNewPairing("10c5a846-9005-474b-8e60-494fad24bdf8")
 	user := moonOwners(d, "api-lp1.pctl.srv.nintendo.net")[0].(map[string]any)["user"].(map[string]any)
 	link, _ := user["miiUri"].(map[string]any)["small"].(string)
-	if link != "https://api-lp1.pctl.srv.nintendo.net/moon/v1/mii/10c5a846-9005-474b-8e60-494fad24bdf8/face.png" || len(link) > 255 {
+	if !regexp.MustCompile(`^https://api-lp1\.pctl\.srv\.nintendo\.net/moon/v1/mii/10c5a846-9005-474b-8e60-494fad24bdf8/face-[0-9a-f]{8}\.png$`).MatchString(link) || len(link) > 255 {
 		t.Fatalf("link %q", link)
+	}
+	if icon, _ := user["iconUri"].(map[string]any)["small"].(string); icon != link {
+		t.Fatalf("iconUri.small %q, miiUri.small %q -- 23.x reads the one, 22.5 the other", icon, link)
 	}
 	if w, _ := moonReq(t, s, "GET", strings.TrimPrefix(link, "https://api-lp1.pctl.srv.nintendo.net"), "", ""); w.Code != 200 || w.Header().Get("Content-Type") != "image/png" {
 		t.Fatalf("picture status %d type %q", w.Code, w.Header().Get("Content-Type"))

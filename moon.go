@@ -527,10 +527,16 @@ func pctlConform(v, schema any) any {
 // its code: that is who the console is about to be paired with.
 // Every owner carries the managing account's name, since that is the only
 // account behind a record.
-// `miiUri.small` is a URL the console downloads the picture from (at most 255
-// bytes; it keeps the file under the URL's last path segment). It points back
-// at this host so it resolves and authenticates like every other moon call;
-// host is empty where no console will follow the link.
+//
+// The picture is a URL the console downloads (at most 255 bytes), under two
+// keys: 22.5 reads `miiUri.small` (nullable), 23.x reads `iconUri.small` and
+// ignores `miiUri` (pctl 23.0.1 owners table 0x2484a8). `iconUri` is typed as a
+// plain object there, so `"iconUri": null` ends the parse as 2142-0234; an
+// absent key is fine. So both keys carry the same object, or neither is sent.
+// The console files the picture as `icon/<naId>-<last path segment>` and only
+// fetches again when that name changes, so the segment is the picture's own
+// hash (pctlIconOf). It points back at this host so it resolves like every
+// other moon call; host is empty where no console will follow the link.
 func moonOwners(d *PctlDevice, host string) []any {
 	owners := d.Owners
 	if len(owners) == 0 && d.ManagedBy != "" {
@@ -547,12 +553,84 @@ func moonOwners(d *PctlDevice, host string) []any {
 			continue
 		}
 		user := map[string]any{"nintendoAccountId": na, "nickname": name}
-		if host != "" && pctlAccountID(d.ManagedBy) {
-			user["miiUri"] = map[string]any{"small": "https://" + host + "/moon/v1/mii/" + d.ManagedBy + "/face.png"}
+		if link := pctlIconURL(host, d.ManagedBy); link != "" {
+			icon := map[string]any{"small": link}
+			user["miiUri"], user["iconUri"] = icon, icon
 		}
 		out = append(out, map[string]any{"deviceId": d.Hex(), "user": user})
 	}
 	return out
+}
+
+// pctlIconURL is where the console fetches an account's picture, or "" when
+// there is no host to point at or no picture to serve.
+func pctlIconURL(host, account string) string {
+	if host == "" {
+		return ""
+	}
+	if _, file := pctlIconOf(account, false); file != "" {
+		return "https://" + host + "/moon/v1/mii/" + account + "/" + file
+	}
+	return ""
+}
+
+// pctlIcons holds each parent's picture as the console is served it, so the
+// owners list names exactly the bytes the picture route then answers with.
+var pctlIcons = struct {
+	sync.Mutex
+	m map[string]pctlIcon
+}{m: map[string]pctlIcon{}}
+
+type pctlIcon struct {
+	png  []byte
+	file string // face-<first 8 hex of its sha256>.png
+	at   time.Time
+}
+
+// pctlIconTTL is how long a picture is used before the website is asked
+// again; a parent's profile change (pctlParentProfile) refreshes it at once.
+const pctlIconTTL = 10 * time.Minute
+
+// pctlIconMax: the console refuses more than 96 KiB (pctl 23.0.1 .text
+// 0x162b00, 0x18000; 22.5 0x15e994). 64 KiB is what was kept before that was known.
+const pctlIconMax = 64 << 10
+
+// pctlIconOf is an account's picture as the 128px PNG the console is served,
+// and the file name it goes by: the hash of those bytes, so a new picture is
+// a new name and the console fetches it, and an unchanged one is the same name
+// and costs nothing. nil and "" when there is no picture. A website that fails
+// to answer leaves the last picture in place rather than taking it away.
+func pctlIconOf(account string, refresh bool) ([]byte, string) {
+	site := getenv("WEBSITE_INTERNAL_URL", "")
+	if site == "" || !pctlAccountID(account) {
+		return nil, ""
+	}
+	pctlIcons.Lock()
+	c, ok := pctlIcons.m[account]
+	pctlIcons.Unlock()
+	if ok && !refresh && time.Since(c.at) < pctlIconTTL {
+		return c.png, c.file
+	}
+	img, err := fetchAvatar(site + "/media/avatars/" + account + "/console.jpg")
+	if err == nil {
+		img, err = pctlFacePNG(img)
+	}
+	if err == nil && len(img) > pctlIconMax {
+		err = fmt.Errorf("%d bytes, over %d", len(img), pctlIconMax)
+	}
+	if err != nil {
+		log.Printf("[moon] picture of %s: %v", account, err)
+	} else {
+		sum := sha256.Sum256(img)
+		c = pctlIcon{png: img, file: "face-" + hex.EncodeToString(sum[:4]) + ".png"}
+	}
+	c.at = time.Now()
+	if c.file != "" {
+		pctlIcons.Lock()
+		pctlIcons.m[account] = c
+		pctlIcons.Unlock()
+	}
+	return c.png, c.file
 }
 
 // pctlAccountID reports whether s is safe to put in a path: an OpenPak account
@@ -564,21 +642,15 @@ func pctlAccountID(s string) bool {
 // moonMii is the parent's picture, relayed from the website's media store and
 // re-encoded: the website keeps a console JPEG, and the console showed nothing
 // for one (hardware, v0.43.0) -- Nintendo's own are small PNGs. The console
-// keeps at most 64 KiB (pctl .text 0x4d060) and files the picture under the
-// URL's last segment, so a new name is what makes it fetch again.
+// files the picture under the URL's last segment, so a new name is what makes
+// it fetch again (pctlIconOf). Any last segment answers with the current
+// picture: the hashed name with the bytes it names, and the `face.png` links
+// consoles were given before the hash still work.
 func (s *server) moonMii(w http.ResponseWriter, path string) {
 	account, _, _ := strings.Cut(path, "/")
-	site := getenv("WEBSITE_INTERNAL_URL", "")
-	if site == "" || !pctlAccountID(account) {
-		moonError(w, moonNotFound)
-		return
-	}
-	img, err := fetchAvatar(site + "/media/avatars/" + account + "/console.jpg")
-	if err == nil {
-		img, err = pctlFacePNG(img)
-	}
-	if err != nil || len(img) > 64<<10 {
-		log.Printf("[moon] mii %s: %d bytes, err %v", account, len(img), err)
+	img, _ := pctlIconOf(account, false)
+	if img == nil {
+		log.Printf("[moon] mii %s: no picture", path)
 		moonError(w, moonNotFound)
 		return
 	}
