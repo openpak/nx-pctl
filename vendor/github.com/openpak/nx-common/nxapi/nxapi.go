@@ -170,6 +170,7 @@ const (
 	PathIdentityPresence = "/internal/identity/presence"  // POST Presence; POST /renew PresenceRenewal
 
 	PathPenneRegistrations  = "/internal/penne/registrations/"  // GET {penne_id}
+	PathPenneConsoleRegs    = "/internal/penne/console-registrations/" // GET {device certificate id}
 	PathPenneConsoles       = "/internal/penne/consoles"        // POST ConsoleBinding
 	PathPennePushChannels   = "/internal/penne/push-channels"   // POST PushChannel
 	PathPenneNotifications  = "/internal/penne/notifications"   // POST Notification -> Submission
@@ -288,6 +289,17 @@ func (c *Client) RenewPresence(ctx context.Context, userID, device string) error
 func (c *Client) Registration(ctx context.Context, penneID string) (*Registration, error) {
 	var r Registration
 	if err := c.Do(ctx, http.MethodGet, PathPenneRegistrations+url.PathEscape(penneID), nil, &r); err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// ConsoleRegistration is the Penne registration of the console a device certificate names
+// (cert-…, the subject of its dauth device token), with every user signed in on it. Licence
+// checks arrive with that certificate only, so this is how they find every profile's account.
+func (c *Client) ConsoleRegistration(ctx context.Context, deviceCert string) (*Registration, error) {
+	var r Registration
+	if err := c.Do(ctx, http.MethodGet, PathPenneConsoleRegs+url.PathEscape(deviceCert), nil, &r); err != nil {
 		return nil, err
 	}
 	return &r, nil
