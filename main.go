@@ -52,21 +52,20 @@ type devicePusher interface {
 
 // penneDeviceMessage writes one message to the live connections of the console's Penne
 // registration: the token it gave at activate, else the registration made under its device
-// certificate. It returns the registration and how many connections took the message.
-func (s *server) penneDeviceMessage(penneID, dauthUser, name, receivers, body string) (string, int) {
+// certificate. It returns the registration and how many connections took the message; the
+// error is the push side being unreachable (moon.go logs it; the save stands either way and
+// the console catches up at its next scheduled retrieve).
+func (s *server) penneDeviceMessage(penneID, dauthUser, name, receivers, body string) (string, int, error) {
 	if s.penne == nil {
-		return "", 0
+		return "", 0, errors.New("no push side configured")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	res, err := s.penne.DeviceMessage(ctx, nxapi.DeviceMessage{PenneID: penneID, DauthUser: dauthUser, Name: name, Receivers: receivers, Body: body})
 	if err != nil {
-		// Best effort, as it always was: the save stands, and the console catches up at
-		// its next scheduled retrieve.
-		log.Printf("%s push %s: %v", logPrefix, name, err)
-		return penneID, 0
+		return penneID, 0, err
 	}
-	return res.PenneID, res.Connections
+	return res.PenneID, res.Connections, nil
 }
 
 // fixedNames were on nx-baas's fixed certificate and stay fixed here. The movie host was
@@ -104,15 +103,19 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// internalAPI is the plain-HTTP listener: the parent-side routes the website calls, a
-// health check, and the console routes for requests nx-baas forwards with their Host kept.
+// internalAPI is the plain-HTTP listener: the console routes for requests nx-baas forwards
+// with their Host kept, and -- for every other Host -- the parent-side routes the website
+// calls and a health check. A console host never reaches the parent routes
+// (nxhttp.SplitListener).
 func (s *server) internalAPI() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/internal/pctl/pairing", s.pctlPairing)
 	mux.HandleFunc("/internal/pctl/devices", s.pctlDeviceList)
 	mux.HandleFunc("/internal/pctl/devices/", s.pctlDeviceRoute)
-	mux.Handle("/", s)
-	return mux
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]any{"status": "ok", "service": "nx-pctl"})
+	})
+	return nxhttp.SplitListener(s, mux)
 }
 
 func main() {

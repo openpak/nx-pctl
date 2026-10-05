@@ -78,3 +78,24 @@ func Misrouted(prefix string, w http.ResponseWriter, r *http.Request) {
 	log.Printf("%s !! MISROUTED %s %s%s: this service does not own that hostname", prefix, r.Method, HostOf(r), r.URL.Path)
 	WriteJSON(w, http.StatusMisdirectedRequest, map[string]any{"status": 421, "title": "misdirected request"})
 }
+
+// ConsoleHost reports whether host is one a console names: a Nintendo hostname, which is
+// what nx-baas keeps on the requests it forwards.
+func ConsoleHost(host string) bool {
+	return strings.HasSuffix(host, ".nintendo.net") || strings.HasSuffix(host, ".nintendo.com") ||
+		host == "nintendo.net" || host == "nintendo.com"
+}
+
+// SplitListener is a service's internal listener: requests naming a console host (nx-baas's
+// forwards) go to console, straight, never through a ServeMux, so no forwarded path is
+// cleaned or redirected and none can reach an admin route; everything else goes to
+// internal, which holds the /internal routes the website and the other services call.
+func SplitListener(console, internal http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ConsoleHost(HostOf(r)) {
+			console.ServeHTTP(w, r)
+			return
+		}
+		internal.ServeHTTP(w, r)
+	})
+}

@@ -1702,7 +1702,11 @@ func (s *server) pctlPush(d *PctlDevice) {
 		return
 	}
 	body, _ := json.Marshal(map[string]any{"deviceId": d.Hex(), "eventId": pctlSettingChanged})
-	token, n := s.penneDeviceMessage(d.NotificationToken, d.DauthID, pctlSettingChanged, "pctl", string(body))
+	token, n, err := s.penneDeviceMessage(d.NotificationToken, d.DauthID, pctlSettingChanged, "pctl", string(body))
+	if err != nil {
+		log.Printf("[moon] device %s: push not delivered (%v); the console fetches on its own schedule", d.Hex(), err)
+		return
+	}
 	if token == "" {
 		log.Printf("[moon] device %s: no notification token; the console fetches on its own schedule", d.Hex())
 		return

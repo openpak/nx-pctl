@@ -98,10 +98,62 @@ func TestFirstStartImportsTheRecordsFromBaasJSON(t *testing.T) {
 		t.Fatalf("pctl.json carries more than the records: %s", written)
 	}
 	s.PctlNewPairing("acct-other")
-	os.WriteFile(baas, []byte(`{}`), 0o600)
+	// nx-baas keeps writing baas.json (logins, presence); its records stay as they were.
+	doc["users"] = map[string]any{"u2": map[string]any{"id": "u2"}}
+	b, _ = json.Marshal(doc)
+	os.WriteFile(baas, b, 0o600)
 	again := loadStore(mine, baas)
 	if len(again.PctlDevicesFor("acct-other")) != 1 || again.PctlByMoonID(d.Hex()) == nil {
 		t.Fatal("a restart re-imported baas.json over our own file")
+	}
+
+	// Rollback: nx-baas serves parental controls again and its records move on; the second
+	// cut-over takes them rather than resuming from our stale copy.
+	old.PctlNewPairing("acct-third")
+	b, _ = os.ReadFile(old.path)
+	json.Unmarshal(b, &doc)
+	b, _ = json.Marshal(doc)
+	os.WriteFile(baas, b, 0o600)
+	recut := loadStore(mine, baas)
+	if len(recut.PctlDevicesFor("acct-third")) != 1 {
+		t.Fatal("the second cut-over resumed from our stale records instead of nx-baas's")
+	}
+	if kept, _ := filepath.Glob(mine + ".before-import-*"); len(kept) != 1 {
+		t.Fatalf("our replaced records were not kept aside: %v", kept)
+	}
+}
+
+// With no records left the file still carries the key, so a rollback can apply it.
+func TestNoRecordsIsStillAnObject(t *testing.T) {
+	s := loadStore(filepath.Join(t.TempDir(), "pctl.json"), "")
+	d := s.PctlNewPairing("a")
+	s.PctlUnlink(d.Hex())
+	b, _ := os.ReadFile(s.path)
+	if !strings.Contains(string(b), `"pctlDevices": {}`) {
+		t.Fatalf("pctl.json with no records = %s", b)
+	}
+}
+
+// A console host on the internal listener never reaches the parent routes.
+func TestConsoleHostNeverReachesTheParentRoutes(t *testing.T) {
+	t.Setenv("NX_INTERNAL_KEY", "k")
+	s := &server{store: pctlStore(t)}
+	r := httptest.NewRequest("POST", "http://openpak-nx-pctl:20070/internal/pctl/pairing", strings.NewReader(`{"account_id":"a"}`))
+	r.Host = "api-lp1.pctl.srv.nintendo.net"
+	r.Header.Set("X-Internal-Key", "k")
+	w := httptest.NewRecorder()
+	s.internalAPI().ServeHTTP(w, r)
+	if strings.Contains(w.Body.String(), "pairing_code") {
+		t.Fatalf("console host reached the parent routes: %d %s", w.Code, w.Body)
+	}
+}
+
+// A push the push side did not take is an error, not "no notification token".
+func TestFailedPushIsAnError(t *testing.T) {
+	s, _ := moonServer(t)
+	s.penne = &fakePenne{down: true}
+	if _, _, err := s.penneDeviceMessage("", "cert-1", "x", "pctl", "{}"); err == nil {
+		t.Fatal("an unreachable push side was not an error")
 	}
 }
 
@@ -123,8 +175,8 @@ func TestPushGoesToThePenneAPI(t *testing.T) {
 	defer penne.Close()
 	s, _ := moonServer(t)
 	s.penne = nxapi.New(penne.URL)
-	if id, n := s.penneDeviceMessage("", "cert-1", "DID_CHANGE_PARENTAL_CONTROL_SETTING", "pctl", "{}"); id != "pz-1" || n != 1 {
-		t.Fatalf("push = %q %d", id, n)
+	if id, n, err := s.penneDeviceMessage("", "cert-1", "DID_CHANGE_PARENTAL_CONTROL_SETTING", "pctl", "{}"); id != "pz-1" || n != 1 || err != nil {
+		t.Fatalf("push = %q %d %v", id, n, err)
 	}
 	if m := <-got; m.DauthUser != "cert-1" || m.Receivers != "pctl" {
 		t.Fatalf("penne got %+v", m)
