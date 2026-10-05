@@ -112,6 +112,7 @@ func (s *server) internalAPI() http.Handler {
 	mux.HandleFunc("/internal/pctl/pairing", s.pctlPairing)
 	mux.HandleFunc("/internal/pctl/devices", s.pctlDeviceList)
 	mux.HandleFunc("/internal/pctl/devices/", s.pctlDeviceRoute)
+	mux.HandleFunc("/internal/pctl/parents/", s.pctlParentProfile)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"status": "ok", "service": "nx-pctl"})
 	})

@@ -1104,6 +1104,39 @@ func (s *Store) PctlSetParent(moonHex, account, name string) (bool, error) {
 	return true, nil
 }
 
+// PctlRenameAccount gives account the name the console shows on every record
+// it is a parent of (managing or further), and returns those records by moon
+// id, true where the name changed. A nil name renames nothing.
+func (s *Store) PctlRenameAccount(account string, name *string) map[string]bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]bool{}
+	rename := func(cur *string) bool {
+		if name == nil || pctlNickname(*name) == *cur {
+			return false
+		}
+		*cur = pctlNickname(*name)
+		return true
+	}
+	for hex, d := range s.pctlDevices() {
+		if d.ManagedBy == account {
+			out[hex] = rename(&d.ParentName)
+		}
+		for i := range d.Parents {
+			if d.Parents[i].AccountID == account {
+				out[hex] = rename(&d.Parents[i].Name) || out[hex]
+			}
+		}
+	}
+	for _, renamed := range out {
+		if renamed {
+			s.save()
+			break
+		}
+	}
+	return out
+}
+
 // PctlRemoveParent takes a further parent off a record, reporting whether it
 // was one.
 func (s *Store) PctlRemoveParent(moonHex, account string) bool {
@@ -1840,6 +1873,7 @@ func (s *server) pctlParentRoute(w http.ResponseWriter, r *http.Request, d *Pctl
 	if r.Method == http.MethodDelete {
 		if s.store.PctlRemoveParent(d.Hex(), account) {
 			log.Printf("[moon] device %s: parent %s removed", d.Hex(), account)
+			s.pctlOwnersPush(s.store.PctlByMoonID(d.Hex()))
 		}
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -1859,8 +1893,53 @@ func (s *server) pctlParentRoute(w http.ResponseWriter, r *http.Request, d *Pctl
 	}
 	if changed {
 		log.Printf("[moon] device %s: parent %s set", d.Hex(), account)
+		s.pctlOwnersPush(s.store.PctlByMoonID(d.Hex()))
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// POST /internal/pctl/parents/{account_id} {"display_name"} -> {"pushed": n}:
+// the website saying an account's name or picture changed (display_name only
+// when the name did). The name is taken on every record the account is a
+// parent of, its picture is fetched again, and each paired console that now
+// shows something different is told (UPDATE_DEVICE_OWNERS). An account that is
+// nobody's parent costs nothing.
+func (s *server) pctlParentProfile(w http.ResponseWriter, r *http.Request) {
+	if !s.internalOK(r) {
+		apiErr(w, http.StatusUnauthorized, "internal")
+		return
+	}
+	if r.Method != http.MethodPost {
+		apiErr(w, http.StatusMethodNotAllowed, "POST required")
+		return
+	}
+	account := strings.TrimPrefix(r.URL.Path, "/internal/pctl/parents/")
+	if !pctlAccountID(account) {
+		apiErr(w, http.StatusBadRequest, "account id")
+		return
+	}
+	var in struct {
+		DisplayName *string `json:"display_name"`
+	}
+	json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&in)
+	records := s.store.PctlRenameAccount(account, in.DisplayName)
+	if len(records) == 0 {
+		writeJSON(w, 200, map[string]any{"pushed": 0})
+		return
+	}
+	pctlIcons.Lock()
+	before := pctlIcons.m[account].file
+	pctlIcons.Unlock()
+	_, after := pctlIconOf(account, true)
+	pushed := 0
+	for _, hex := range slices.Sorted(maps.Keys(records)) {
+		if d := s.store.PctlByMoonID(hex); d != nil && d.DauthID != "" && (records[hex] || before != after) {
+			s.pctlOwnersPush(d)
+			pushed++
+		}
+	}
+	log.Printf("[moon] parent %s changed (picture %q -> %q): %d console(s) told", account, before, after, pushed)
+	writeJSON(w, 200, map[string]any{"pushed": pushed})
 }
 
 // GET …/players/{id}/image -> the player's JPEG, decoded from what the console
@@ -1938,7 +2017,11 @@ func (s *server) pctlPutSetting(w http.ResponseWriter, r *http.Request, d *PctlD
 // at once (.text 0x4fdec). No account id: pctl never reads it. The carrier
 // is the frontline connection whose Penne id the console gave as its
 // notificationToken, the way news.go reaches a console.
-func (s *server) pctlPush(d *PctlDevice) {
+func (s *server) pctlPush(d *PctlDevice) { s.pctlPushEvent(d, pctlSettingChanged) }
+
+// pctlPushEvent sends one of pctl's push events to the console, in the shape
+// and on the carrier pctlPush describes.
+func (s *server) pctlPushEvent(d *PctlDevice, event string) {
 	// The token is the console's Penne id. Paired before v0.47.0, when the token was not
 	// kept, the Penne registration made under the same device certificate is the same
 	// console's: penneDeviceMessage looks that up from DauthID.
@@ -1946,8 +2029,8 @@ func (s *server) pctlPush(d *PctlDevice) {
 		log.Printf("[moon] device %s: no notification token; the console fetches on its own schedule", d.Hex())
 		return
 	}
-	body, _ := json.Marshal(map[string]any{"deviceId": d.Hex(), "eventId": pctlSettingChanged})
-	token, n, err := s.penneDeviceMessage(d.NotificationToken, d.DauthID, pctlSettingChanged, "pctl", string(body))
+	body, _ := json.Marshal(map[string]any{"deviceId": d.Hex(), "eventId": event})
+	token, n, err := s.penneDeviceMessage(d.NotificationToken, d.DauthID, event, "pctl", string(body))
 	if err != nil {
 		log.Printf("[moon] device %s: push not delivered (%v); the console fetches on its own schedule", d.Hex(), err)
 		return
@@ -1956,11 +2039,28 @@ func (s *server) pctlPush(d *PctlDevice) {
 		log.Printf("[moon] device %s: no notification token; the console fetches on its own schedule", d.Hex())
 		return
 	}
-	log.Printf("[moon] device %s: pushed %s on %d connection(s) of registration %s", d.Hex(), pctlSettingChanged, n, token)
+	log.Printf("[moon] device %s: pushed %s on %d connection(s) of registration %s", d.Hex(), event, n, token)
 }
 
 // pctlSettingChanged is the first value of pctl's eventId enum (vaddr 0x13ab20).
 const pctlSettingChanged = "DID_CHANGE_PARENTAL_CONTROL_SETTING"
+
+// pctlOwnersChanged is the sixth value, new in 23.x (pctl 23.0.1 enum 0x245ca0,
+// handler 0x152960): the console re-reads GET …/owners at once and redraws its
+// parents. 22.5 does not know the value and drops the message, which is
+// harmless. Sent when a paired console's owners change on the parent side:
+// a further parent added, renamed or removed, or a parent's name or picture
+// changed. Owner changes the console made itself (owners/%016llx) are not
+// pushed back to it.
+const pctlOwnersChanged = "UPDATE_DEVICE_OWNERS"
+
+// pctlOwnersPush tells a paired console its owners changed. A record no
+// console has claimed has nobody to tell.
+func (s *server) pctlOwnersPush(d *PctlDevice) {
+	if d != nil && d.DauthID != "" {
+		s.pctlPushEvent(d, pctlOwnersChanged)
+	}
+}
 
 // pctlDropped names the first path (sorted, dotted) where the conformed
 // document differs from what was sent, or "" when nothing was dropped or

@@ -298,3 +298,78 @@ func TestIconNameFollowsThePicture(t *testing.T) {
 		prev = cur
 	}
 }
+
+// Every parent-side change to a paired console's owners queues UPDATE_DEVICE_OWNERS for that
+// console, in the body pctl 23.0.1 parses and on the carrier the setting push uses; nothing
+// that leaves the owners as they were does, and a record no console claimed is never pushed.
+func TestOwnerChangesPushUpdateDeviceOwners(t *testing.T) {
+	site := newFakeSite(t)
+	t.Setenv("NX_INTERNAL_KEY", "")
+	s, _ := moonServer(t)
+	push := &fakePenne{}
+	s.penne = push
+	a1, a2, a3 := testAccount(1), testAccount(2), testAccount(3)
+	site.set(a1, 10)
+	site.set(a2, 20)
+	paired := pairedFor(t, s, a1)
+	unpaired := s.store.PctlNewPairing(a1) // a fresh code beside the paired console
+	h := s.internalAPI()
+	call := func(method, path, body string) int {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(method, "http://openpak-nx-pctl:20070"+path, strings.NewReader(body)))
+		return w.Code
+	}
+	parent := func(d *PctlDevice, account string) string {
+		return "/internal/pctl/devices/" + d.Hex() + "/parents/" + account + "?account_id=" + a1
+	}
+
+	for _, step := range []struct {
+		name   string
+		before func()
+		method string
+		path   string
+		body   string
+		status int
+		pushes int // to the paired console
+	}{
+		{"a second parent is added", nil, "PUT", parent(paired, a2), `{"display_name":"B"}`, 204, 1},
+		{"the same parent, same name", nil, "PUT", parent(paired, a2), `{"display_name":"B"}`, 204, 0},
+		{"the second parent is renamed", nil, "PUT", parent(paired, a2), `{"display_name":"Bee"}`, 204, 1},
+		{"a parent on a record no console claimed", nil, "PUT", parent(unpaired, a3), `{"display_name":"C"}`, 204, 0},
+		// The console has read its owners, so the pictures it holds are the cached ones.
+		{"a profile change that changes nothing", func() { ownersBody(t, s, paired) }, "POST", "/internal/pctl/parents/" + a2, `{}`, 200, 0},
+		{"a further parent's new picture", func() { site.set(a2, 220) }, "POST", "/internal/pctl/parents/" + a2, `{}`, 200, 1},
+		{"the managing parent's new name", nil, "POST", "/internal/pctl/parents/" + a1, `{"display_name":"Alexis"}`, 200, 1},
+		{"the managing parent, same name", nil, "POST", "/internal/pctl/parents/" + a1, `{"display_name":"Alexis"}`, 200, 0},
+		{"an account that is nobody's parent", nil, "POST", "/internal/pctl/parents/" + testAccount(9), `{"display_name":"X"}`, 200, 0},
+		{"the second parent is removed", nil, "DELETE", parent(paired, a2), ``, 204, 1},
+		{"removed again", nil, "DELETE", parent(paired, a2), ``, 204, 0},
+		{"a parent's setting save is not an owner change", nil, "PUT", "/internal/pctl/devices/" + paired.Hex() + "/setting?account_id=" + a1, `{"unlock_code":"4827"}`, 200, 0},
+	} {
+		if step.before != nil {
+			step.before()
+		}
+		push.sent = nil
+		if got := call(step.method, step.path, step.body); got != step.status {
+			t.Fatalf("%s: status %d, want %d", step.name, got, step.status)
+		}
+		owners := 0
+		for _, m := range push.sent {
+			if m.Name != pctlOwnersChanged {
+				continue
+			}
+			owners++
+			if m.Receivers != "pctl" || m.DauthUser != paired.DauthID ||
+				m.Body != `{"deviceId":"`+paired.Hex()+`","eventId":"UPDATE_DEVICE_OWNERS"}` {
+				t.Fatalf("%s: pushed %+v", step.name, m)
+			}
+		}
+		if owners != step.pushes {
+			t.Fatalf("%s: %d UPDATE_DEVICE_OWNERS push(es), want %d (sent %+v)", step.name, owners, step.pushes, push.sent)
+		}
+	}
+	_, users := ownersBody(t, s, paired)
+	if len(users) != 1 || users[0]["nickname"] != "Alexis" {
+		t.Fatalf("owners after the changes: %v", users)
+	}
+}
