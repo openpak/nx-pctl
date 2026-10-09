@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"image"
 	"image/jpeg"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"path"
@@ -371,5 +372,28 @@ func TestOwnerChangesPushUpdateDeviceOwners(t *testing.T) {
 	_, users := ownersBody(t, s, paired)
 	if len(users) != 1 || users[0]["nickname"] != "Alexis" {
 		t.Fatalf("owners after the changes: %v", users)
+	}
+}
+
+// The console draws the parent's picture only at exactly 128x128 (qlaunch
+// 23.0.1 0x09112420), whatever size the website keeps.
+func TestParentPictureIsAlways128(t *testing.T) {
+	for _, size := range [][2]int{{256, 256}, {300, 300}, {100, 100}, {400, 250}} {
+		src := image.NewRGBA(image.Rect(0, 0, size[0], size[1]))
+		var jpg bytes.Buffer
+		if err := jpeg.Encode(&jpg, src, nil); err != nil {
+			t.Fatal(err)
+		}
+		out, err := pctlFacePNG(jpg.Bytes())
+		if err != nil {
+			t.Fatal(err)
+		}
+		img, err := png.Decode(bytes.NewReader(out))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b := img.Bounds(); b.Dx() != 128 || b.Dy() != 128 {
+			t.Fatalf("%dx%d became %dx%d", size[0], size[1], b.Dx(), b.Dy())
+		}
 	}
 }

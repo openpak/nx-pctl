@@ -704,27 +704,35 @@ func (s *server) moonMii(w http.ResponseWriter, path string) {
 	w.Write(img)
 }
 
-// pctlFacePNG turns a JPEG into a PNG of at most 128 pixels a side.
-// ponytail: box average by a whole factor, so a 256px avatar halves exactly and
-// an odd size lands a little under 128. x/image/draw if quality ever matters.
+// pctlFacePNG turns a JPEG into the 128x128 PNG the console draws: qlaunch
+// 23.0.1 decodes it with libpng and draws it only when width x height x 4 is
+// its 128x128 texture (0x09112420, texture at 0x08EE2E70), so any other size
+// shows the grey silhouette. The centre square is box-averaged down (or
+// sampled up) to exactly 128 pixels a side.
 func pctlFacePNG(jpg []byte) ([]byte, error) {
 	src, err := jpeg.Decode(bytes.NewReader(jpg))
 	if err != nil {
 		return nil, err
 	}
+	const side = 128
 	b := src.Bounds()
-	n := max(1, (max(b.Dx(), b.Dy())+127)/128)
-	dst := image.NewRGBA(image.Rect(0, 0, b.Dx()/n, b.Dy()/n))
-	for y := 0; y < dst.Rect.Dy(); y++ {
-		for x := 0; x < dst.Rect.Dx(); x++ {
-			var r, g, bl uint32
-			for dy := 0; dy < n; dy++ {
-				for dx := 0; dx < n; dx++ {
-					cr, cg, cb, _ := src.At(b.Min.X+x*n+dx, b.Min.Y+y*n+dy).RGBA()
-					r, g, bl = r+cr>>8, g+cg>>8, bl+cb>>8
+	sq := min(b.Dx(), b.Dy())
+	if sq <= 0 {
+		return nil, fmt.Errorf("empty picture")
+	}
+	x0, y0 := b.Min.X+(b.Dx()-sq)/2, b.Min.Y+(b.Dy()-sq)/2
+	dst := image.NewRGBA(image.Rect(0, 0, side, side))
+	for y := 0; y < side; y++ {
+		sy0, sy1 := y*sq/side, max((y+1)*sq/side, y*sq/side+1)
+		for x := 0; x < side; x++ {
+			sx0, sx1 := x*sq/side, max((x+1)*sq/side, x*sq/side+1)
+			var r, g, bl, k uint32
+			for sy := sy0; sy < sy1; sy++ {
+				for sx := sx0; sx < sx1; sx++ {
+					cr, cg, cb, _ := src.At(x0+sx, y0+sy).RGBA()
+					r, g, bl, k = r+cr>>8, g+cg>>8, bl+cb>>8, k+1
 				}
 			}
-			k := uint32(n * n)
 			dst.SetRGBA(x, y, color.RGBA{uint8(r / k), uint8(g / k), uint8(bl / k), 255})
 		}
 	}
