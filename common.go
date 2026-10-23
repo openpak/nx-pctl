@@ -77,3 +77,12 @@ func fetchAvatar(url string) ([]byte, error) {
 	}
 	return img, nil
 }
+
+// redact keeps the last 4 characters of an identifier or pairing code so
+// log lines can be correlated without exposing them (minors' data).
+func redact(s string) string {
+	if len(s) <= 4 {
+		return "****"
+	}
+	return "..." + s[len(s)-4:]
+}

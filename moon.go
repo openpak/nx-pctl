@@ -103,9 +103,12 @@ func (s *server) moon(w http.ResponseWriter, r *http.Request, body []byte) {
 		s.serviceStatus(w, r, body)
 		return
 	}
-	// In full, except the PIN: the console sends it in `activate` and in every
-	// receipt, and a log is read by more people than a parent's PIN should be.
-	dump(r, pctlPinInBody.ReplaceAll(body, []byte(`${1}****"`)), "[moon] pctl")
+	// The full request (query, headers, body) carries pairing codes, account ids
+	// and serials, so it is a debug-level dump (NX_DEBUG), PIN masked. At info
+	// level only the method and path are logged (ServeHTTP).
+	if debug {
+		dump(r, pctlPinInBody.ReplaceAll(body, []byte(`${1}****"`)), "[moon] pctl")
+	}
 
 	// The bearer is a dauth device token, signed by this server, so its `sub`
 	// is the device id (dauth.go). A request without one can still search for a
@@ -143,7 +146,7 @@ func (s *server) moonSearch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if code == "" {
-		log.Printf("[moon] search with no pairing-code filter: %s", r.URL.RawQuery)
+		log.Printf("[moon] search with no pairing-code filter")
 		moonItems(w, nil)
 		return
 	}
@@ -154,7 +157,7 @@ func (s *server) moonSearch(w http.ResponseWriter, r *http.Request) {
 		// ponytail: one global counter per minute, not per-IP -- Traefik splices
 		// the console connection so no handler here sees a source address
 		// (docs/switch, §U3). Per-IP when PROXY protocol lands.
-		log.Printf("[moon] pairing-code lookups throttled; refusing %q", code)
+		log.Printf("[moon] pairing-code lookups throttled; refusing %s", redact(code))
 		moonItems(w, nil)
 		return
 	}
@@ -163,11 +166,11 @@ func (s *server) moonSearch(w http.ResponseWriter, r *http.Request) {
 		pctlSearchMiss()
 		// An empty list, not a 404: the console asked a question ("which device
 		// has this code"), and "none" is an answer to it.
-		log.Printf("[moon] pairing code %q: no record", code)
+		log.Printf("[moon] pairing code %s: no record", redact(code))
 		moonItems(w, nil)
 		return
 	}
-	log.Printf("[moon] pairing code %q -> device %s", code, d.Hex())
+	log.Printf("[moon] pairing code %s -> device %s", redact(code), d.Hex())
 	moonItems(w, []any{moonDeviceObj(d)})
 }
 
@@ -205,7 +208,7 @@ func (s *server) moonDevice(w http.ResponseWriter, r *http.Request, body []byte,
 			moonError(w, moonForbidden)
 			return
 		}
-		log.Printf("[moon] device %s activated by %s", bound.Hex(), device)
+		log.Printf("[moon] device %s activated by %s", bound.Hex(), redact(device))
 		// The console hands over its whole state here, setting and PIN included
 		// (hardware, v0.42.0). That is the document the parent side edits from.
 		if set, ok := jsonObj(body)["parentalControlSetting"].(map[string]any); ok {
@@ -228,7 +231,7 @@ func (s *server) moonDevice(w http.ResponseWriter, r *http.Request, body []byte,
 
 	// Everything else needs this console to be the one that claimed the record.
 	if device == "" || d.DauthID != device {
-		log.Printf("[moon] %s %s: bearer device %q is not %q", r.Method, r.URL.Path, device, d.DauthID)
+		log.Printf("[moon] %s %s: bearer device %s is not %s", r.Method, r.URL.Path, redact(device), redact(d.DauthID))
 		moonError(w, moonForbidden)
 		return
 	}
@@ -259,7 +262,7 @@ func (s *server) moonDevice(w http.ResponseWriter, r *http.Request, body []byte,
 		switch r.Method {
 		case http.MethodPut, http.MethodPost:
 			s.store.PctlAddOwner(d.Hex(), na)
-			log.Printf("[moon] device %s owner %s linked", d.Hex(), na)
+			log.Printf("[moon] device %s owner %s linked", d.Hex(), redact(na))
 			writeJSON(w, 200, map[string]any{"nintendoAccountId": na})
 		case http.MethodDelete:
 			// This is how a console unlinks: it lists the owners and deletes
@@ -269,7 +272,7 @@ func (s *server) moonDevice(w http.ResponseWriter, r *http.Request, body []byte,
 			// parent off.
 			if s.store.PctlRemoveOwner(d.Hex(), na) == 0 {
 				s.store.PctlUnlink(d.Hex())
-				log.Printf("[moon] device %s unlinked: its last owner %s was removed", d.Hex(), na)
+				log.Printf("[moon] device %s unlinked: its last owner %s was removed", d.Hex(), redact(na))
 			}
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -296,7 +299,7 @@ func (s *server) moonDevice(w http.ResponseWriter, r *http.Request, body []byte,
 		nick, _ := doc["nickname"].(string)
 		img, _ := doc["imageData"].(string)
 		s.store.PctlSetPlayer(d.Hex(), player, &PctlPlayer{Nickname: nick, ImageData: img})
-		log.Printf("[moon] device %s player %s is %q", d.Hex(), player, nick)
+		log.Printf("[moon] device %s player %s set", d.Hex(), redact(player))
 		writeJSON(w, 200, map[string]any{"nickname": nick})
 	case strings.HasPrefix(tail, "players") && r.Method == http.MethodGet:
 		// The console's players, for the parent app's icons. Empty until the
@@ -664,7 +667,7 @@ func pctlIconOf(account string, refresh bool) ([]byte, string) {
 		err = fmt.Errorf("%d bytes, over %d", len(img), pctlIconMax)
 	}
 	if err != nil {
-		log.Printf("[moon] picture of %s: %v", account, err)
+		log.Printf("[moon] picture of %s: %v", redact(account), err)
 	} else {
 		sum := sha256.Sum256(img)
 		c = pctlIcon{png: img, file: "face-" + hex.EncodeToString(sum[:4]) + ".png"}
@@ -695,7 +698,7 @@ func (s *server) moonMii(w http.ResponseWriter, path string) {
 	account, _, _ := strings.Cut(path, "/")
 	img, _ := pctlIconOf(account, false)
 	if img == nil {
-		log.Printf("[moon] mii %s: no picture", path)
+		log.Printf("[moon] mii %s: no picture", redact(account))
 		moonError(w, moonNotFound)
 		return
 	}
@@ -1719,8 +1722,8 @@ func (s *server) pctlPairing(w http.ResponseWriter, r *http.Request) {
 	json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&in)
 	d := s.store.PctlNewPairing(in.AccountID)
 	s.store.PctlNameParent(d.Hex(), in.DisplayName)
-	log.Printf("[moon] pairing code %s for account=%q device=%s (expires %ds)",
-		d.PairingCode, in.AccountID, d.Hex(), int(pctlPairingTTL.Seconds()))
+	log.Printf("[moon] pairing code %s for account=%s device=%s (expires %ds)",
+		redact(d.PairingCode), redact(in.AccountID), d.Hex(), int(pctlPairingTTL.Seconds()))
 	writeJSON(w, 200, map[string]any{
 		"moon_id": d.Hex(), "pairing_code": d.PairingCode, "expires_at": d.PairingExpires,
 	})
@@ -1845,7 +1848,7 @@ func (s *server) pctlDeviceRoute(w http.ResponseWriter, r *http.Request) {
 		// told: it stays linked on its own side and gets a 404 at its next
 		// sync, so this is for a console that is already gone or reset.
 		s.store.PctlUnlink(d.Hex())
-		log.Printf("[moon] device %s removed by account %q", d.Hex(), account)
+		log.Printf("[moon] device %s removed by account %s", d.Hex(), redact(account))
 		w.WriteHeader(http.StatusNoContent)
 	case len(parts) == 2 && parts[1] == "setting" && r.Method == http.MethodPut:
 		s.pctlPutSetting(w, r, d)
@@ -1880,7 +1883,7 @@ func (s *server) pctlParentRoute(w http.ResponseWriter, r *http.Request, d *Pctl
 	}
 	if r.Method == http.MethodDelete {
 		if s.store.PctlRemoveParent(d.Hex(), account) {
-			log.Printf("[moon] device %s: parent %s removed", d.Hex(), account)
+			log.Printf("[moon] device %s: parent %s removed", d.Hex(), redact(account))
 			s.pctlOwnersPush(s.store.PctlByMoonID(d.Hex()))
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -1900,7 +1903,7 @@ func (s *server) pctlParentRoute(w http.ResponseWriter, r *http.Request, d *Pctl
 		return
 	}
 	if changed {
-		log.Printf("[moon] device %s: parent %s set", d.Hex(), account)
+		log.Printf("[moon] device %s: parent %s set", d.Hex(), redact(account))
 		s.pctlOwnersPush(s.store.PctlByMoonID(d.Hex()))
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -1946,7 +1949,7 @@ func (s *server) pctlParentProfile(w http.ResponseWriter, r *http.Request) {
 			pushed++
 		}
 	}
-	log.Printf("[moon] parent %s changed (picture %q -> %q): %d console(s) told", account, before, after, pushed)
+	log.Printf("[moon] parent %s changed: %d console(s) told", redact(account), pushed)
 	writeJSON(w, 200, map[string]any{"pushed": pushed})
 }
 

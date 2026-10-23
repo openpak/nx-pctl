@@ -78,7 +78,7 @@ var debug = os.Getenv("NX_DEBUG") != ""
 // ServeHTTP answers the pctl hosts; any other host is misrouted and says so with a 421.
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host := hostOf(r)
-	log.Printf("%s %s %s%s ua=%q", logPrefix, r.Method, host, r.URL.RequestURI(), r.UserAgent())
+	log.Printf("%s %s %s%s ua=%q", logPrefix, r.Method, host, r.URL.Path, r.UserAgent())
 	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if debug {
 		// No PIN in the log: parental controls carry one in both directions.
