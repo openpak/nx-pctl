@@ -20,6 +20,10 @@ type Store struct {
 	// PctlDevices are the parental-controls records, keyed by the moon device id as the
 	// console spells it (moon.go).
 	PctlDevices map[string]*PctlDevice `json:"pctlDevices"`
+	// remote is the parental core when NX_PCTL_BACKEND=parental (parental.go): the records'
+	// source of truth, written on every save; the file is then its mirror. nil: the file
+	// is the store, as before.
+	remote *parentalSync
 }
 
 // loadStore reads pctl.json. With importFrom naming nx-baas's baas.json, a start takes the
@@ -87,6 +91,10 @@ func (s *Store) save() {
 		// Always an object, never absent or null: nx-baas's rollback refuses a file without
 		// one, so "no records" has to be written as {}.
 		s.PctlDevices = map[string]*PctlDevice{}
+	}
+	if s.remote != nil {
+		// First, so a record the core no longer holds leaves the mirror too.
+		s.remote.sync(s.PctlDevices)
 	}
 	b, _ := json.MarshalIndent(s, "", " ")
 	os.WriteFile(s.path+".tmp", b, 0o600)

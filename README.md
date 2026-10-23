@@ -44,15 +44,39 @@ repository (`switch/native-switch-parental-controls-prd.md`,
 | `WEBSITE_INTERNAL_URL` | | the parent's picture |
 | `PCTL_MOVIE` | | the explainer clip; 404 while unset |
 | `NX_DEBUG` | | log every request and reply (PINs masked) |
+| `NX_PCTL_BACKEND` | (unset: the file) | `parental`: keep the records in the parental core (below). **Off by default** |
+| `NX_PARENTAL_ADDR` | | the parental core's gRPC (`openpak-parental:20171`), with the backend on |
+| `NX_PARENTAL_KEY`, `NX_PARENTAL_KEY_FILE` | | this adapter's key there (namespace `switch`) |
 
 A hostname this service does not own is answered 421 and logged. `deploy/` has a sample
 quadlet and the Traefik router; neither is applied anywhere.
 
+## The parental core backend (off by default)
+
+With `NX_PCTL_BACKEND=parental` the records live in the console-neutral parental core
+(`platforms/core/infra/parental`, design and cut-over in its `docs/design.md`); moon.go is
+unchanged and the console sees the same answers. `parental.go` loads the records from the core
+at start and, on every save, writes what changed (`PutDevice` with the version it read,
+`IngestUsage` for new events, `DeleteDevice` for a record that left); a version conflict
+re-reads that record. `pctl.json` stays as a mirror, so unsetting the variable is the
+rollback; the first start keeps the file as it was in `pctl.json.before-parental`, and a
+start on a core with no Switch records while the file has some is refused.
+
+The one-shot importer copies a `pctl.json` (or nx-baas's `baas.json`) into the core, records
+the core does not hold yet, with their events; a second run changes nothing:
+
+    NX_PARENTAL_ADDR=… NX_PARENTAL_KEY_FILE=… nx-pctl -import-parental /app/data/pctl.json
+
+The core deduplicates events by content, so a retried upload the file store kept twice is
+held once there. Records with no managing account id are refused by the core and stay in the
+mirror only.
+
 ## Building
 
 `nx-common` is a sibling module with no remote yet: `go.mod` replaces it with `../nx-common`
-and `vendor/` holds the copy the image build uses. After changing nx-common, run
-`go mod vendor` here and commit `vendor/`.
+and `vendor/` holds the copy the image build uses (and gRPC, for the parental backend). After
+changing nx-common, run `go mod vendor` here and commit `vendor/`. `parentalpb/` is a copy of
+the parental core's generated stubs; refresh by re-copying.
 
     go vet ./... && go test ./...
 

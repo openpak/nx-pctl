@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/rsa"
 	"errors"
+	"flag"
 	"io"
 	"log"
 	"net"
@@ -120,6 +121,11 @@ func (s *server) internalAPI() http.Handler {
 }
 
 func main() {
+	importFrom := flag.String("import-parental", "", "copy the records of this pctl.json (or nx-baas's baas.json) into the parental core, then exit")
+	flag.Parse()
+	if *importFrom != "" {
+		os.Exit(runImport(*importFrom))
+	}
 	key, err := nxjwt.LoadRSAKey(getenv("BAAS_SIGNING_KEY", "/keys/baas_signing_key.pem"))
 	if err != nil {
 		log.Fatalf("%s signing key: %v", logPrefix, err)
@@ -134,7 +140,7 @@ func main() {
 	}
 	data := getenv("NX_DATA", "/data")
 	s := &server{
-		store: loadStore(data+"/pctl.json", os.Getenv("NX_PCTL_IMPORT")),
+		store: openStore(data + "/pctl.json"),
 		key:   key,
 		idKid: getenv("BAAS_KID", "openpak-baas-key-1"),
 		penne: nxapi.New(penneURL),
@@ -150,6 +156,54 @@ func main() {
 	}
 	log.Printf("%s listening %s; records %s/pctl.json (%d); penne %s", logPrefix, srv.Addr, data, len(s.store.PctlDevices), penneURL)
 	log.Fatal(srv.ListenAndServeTLS("", ""))
+}
+
+// openStore is the file store, or with NX_PCTL_BACKEND=parental the parental core with the
+// file as its mirror (parental.go). Unset is the file store, as before.
+func openStore(path string) *Store {
+	switch backend := os.Getenv("NX_PCTL_BACKEND"); backend {
+	case "":
+		return loadStore(path, os.Getenv("NX_PCTL_IMPORT"))
+	case "parental":
+		if os.Getenv("NX_PCTL_IMPORT") != "" {
+			log.Printf("%s NX_PCTL_IMPORT is ignored with the parental backend; use -import-parental", logPrefix)
+		}
+		p, err := dialParental()
+		if err != nil {
+			log.Fatalf("%s %v", logPrefix, err)
+		}
+		st, err := loadParentalStore(path, p)
+		if err != nil {
+			log.Fatalf("%s %v", logPrefix, err)
+		}
+		log.Printf("%s records from the parental core (%d); %s is their mirror", logPrefix, len(st.PctlDevices), path)
+		return st
+	default:
+		log.Fatalf("%s NX_PCTL_BACKEND=%q: unset (file) or parental", logPrefix, backend)
+		return nil
+	}
+}
+
+// runImport is -import-parental: the one-shot copy into the parental core.
+func runImport(path string) int {
+	f, err := os.Open(path)
+	if err != nil {
+		log.Printf("%s import: %v", logPrefix, err)
+		return 1
+	}
+	defer f.Close()
+	p, err := dialParental()
+	if err != nil {
+		log.Printf("%s import: %v", logPrefix, err)
+		return 1
+	}
+	created, skipped, failed, err := importParental(f, p)
+	log.Printf("%s import from %s: %d created, %d already held, %d refused", logPrefix, path, created, skipped, failed)
+	if err != nil {
+		log.Printf("%s import stopped: %v", logPrefix, err)
+		return 1
+	}
+	return 0
 }
 
 // ---------- debug recorder (nx-baas main.go) ----------
