@@ -183,7 +183,7 @@ func startFakeParental(t *testing.T) (*fakeParental, func() *parentalSync) {
 func remoteServer(t *testing.T, path string, client func() *parentalSync) *server {
 	t.Helper()
 	s, _ := moonServer(t)
-	st, err := loadParentalStore(path, client())
+	st, err := loadParentalStore(path, client(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +273,7 @@ func TestParentalBackendKeepsTheRecordsInTheCore(t *testing.T) {
 	}
 
 	// Rollback: the mirror is the file store's own format, with the same records.
-	mirror := loadStore(path, "")
+	mirror := loadStore(path, "", nil)
 	if d := mirror.PctlByMoonID(hex); d == nil || recordJSON(t, d) != wantJSON {
 		t.Fatalf("the mirror is not the current state")
 	}
@@ -339,7 +339,7 @@ func TestParentalImporter(t *testing.T) {
 
 	// A file store as production has it: one paired console with events, one record the
 	// core cannot take.
-	file := loadStore(path, "")
+	file := loadStore(path, "", nil)
 	d := file.PctlNewPairing(testAccount(3))
 	file.PctlActivate(d.Hex(), "cert-bbbbbbbbbbbbbbbb")
 	file.PctlAddEvents(d.Hex(), []byte(`[{"eventType":"DID_APP_PLAY","eventTimestamp":`+jsonNum(time.Now().Unix())+`,"elapsedTime":60}]`))
@@ -347,7 +347,7 @@ func TestParentalImporter(t *testing.T) {
 	want := recordJSON(t, file.PctlByMoonID(d.Hex()))
 
 	// Starting on an empty core is refused: the importer has not run.
-	if _, err := loadParentalStore(path, client()); err == nil || !strings.Contains(err.Error(), "-import-parental") {
+	if _, err := loadParentalStore(path, client(), nil); err == nil || !strings.Contains(err.Error(), "-import-parental") {
 		t.Fatalf("empty core: %v", err)
 	}
 

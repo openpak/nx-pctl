@@ -143,7 +143,7 @@ func (p *parentalSync) forget(hex string) {
 // the first start keeps the file as it was beside it (path.before-parental), and a core
 // that holds no Switch records while the file holds some refuses to start -- that is the
 // importer not having run, and starting would overwrite the file with nothing.
-func loadParentalStore(path string, p *parentalSync) (*Store, error) {
+func loadParentalStore(path string, p *parentalSync, key *sealKey) (*Store, error) {
 	devs := map[string]*PctlDevice{}
 	page := ""
 	for {
@@ -166,7 +166,11 @@ func loadParentalStore(path string, p *parentalSync) (*Store, error) {
 	}
 	local := &Store{path: path}
 	if b, err := os.ReadFile(path); err == nil {
-		if err := json.Unmarshal(b, local); err != nil {
+		plain, err := openFile(key, b)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		if err := json.Unmarshal(plain, local); err != nil {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}
 		if len(devs) == 0 && len(local.PctlDevices) > 0 {
@@ -178,7 +182,7 @@ func loadParentalStore(path string, p *parentalSync) (*Store, error) {
 			}
 		}
 	}
-	s := &Store{path: path, PctlDevices: devs, remote: p}
+	s := &Store{path: path, PctlDevices: devs, remote: p, seal: key}
 	s.mu.Lock()
 	s.save()
 	s.mu.Unlock()

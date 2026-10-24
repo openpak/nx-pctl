@@ -24,6 +24,9 @@ type Store struct {
 	// source of truth, written on every save; the file is then its mirror. nil: the file
 	// is the store, as before.
 	remote *parentalSync
+	// seal is the at-rest key (seal.go): every save writes the file sealed under it. nil
+	// keeps the file in clear (NX_PCTL_BLOB_INSECURE_PLAINTEXT=1, and tests).
+	seal *sealKey
 }
 
 // loadStore reads pctl.json. With importFrom naming nx-baas's baas.json, a start takes the
@@ -33,11 +36,16 @@ type Store struct {
 // baas.json changes on every login, its records do not while parental controls are here --
 // and its fingerprint is kept beside ours (pctl.json.imported). A local file an import
 // replaces is kept as pctl.json.before-import-<time>. Everything else in baas.json is ignored.
-func loadStore(path, importFrom string) *Store {
-	s := &Store{path: path}
+// key opens a sealed pctl.json and seals every save (seal.go); nil reads and writes clear.
+func loadStore(path, importFrom string, key *sealKey) *Store {
+	s := &Store{path: path, seal: key}
 	read := func() *Store {
 		if b, err := os.ReadFile(path); err == nil {
-			if err := json.Unmarshal(b, s); err != nil {
+			plain, err := openFile(key, b)
+			if err != nil {
+				log.Fatalf("%s %s: %v", logPrefix, path, err)
+			}
+			if err := json.Unmarshal(plain, s); err != nil {
 				log.Fatalf("%s %s: %v", logPrefix, path, err)
 			}
 		}
@@ -97,6 +105,6 @@ func (s *Store) save() {
 		s.remote.sync(s.PctlDevices)
 	}
 	b, _ := json.MarshalIndent(s, "", " ")
-	os.WriteFile(s.path+".tmp", b, 0o600)
+	os.WriteFile(s.path+".tmp", encodeFile(s.seal, b), 0o600)
 	os.Rename(s.path+".tmp", s.path)
 }

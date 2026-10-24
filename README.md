@@ -14,7 +14,25 @@ It owns:
   four further parents per console (`PUT/DELETE /internal/pctl/devices/{moon_id}/parents/{account_id}`,
   each shown to the console as its own owner with its own name and picture);
 - `$NX_DATA/pctl.json`: the records, under the same `pctlDevices` key nx-baas kept them in
-  inside `baas.json`.
+  inside `baas.json`, sealed at rest (below).
+
+## PINs at rest
+
+The console needs its PIN in clear (the setting GET and the device object carry it; the
+console checks it locally), so it is encrypted, not hashed. `pctl.json` is sealed whole with
+AES-256-GCM under `NX_PCTL_BLOB_KEY` (`seal.go`): `{"sealed":"aes-256-gcm/v1","kid",
+"nonce","ciphertext"}`, the kid naming the key for a later rotation. Whole file rather than
+the PIN fields because the record also keeps hashes over documents holding the PIN (`etag`,
+`syncedEtag`), and four digits fall out of those by brute force. Only the file changes: what
+consoles and the website receive, ETag included, is byte for byte the same
+(`TestSealingLeavesWhatTheConsoleReceivesUnchanged`).
+
+Every start seals, in place, `pctl.json` and the copies beside it (`.before-parental`,
+`.before-import-*`) still in clear; a sealed file is left alone, so this is idempotent. A
+start without a key is refused; `NX_PCTL_BLOB_INSECURE_PLAINTEXT=1` keeps the file in clear
+for tests and development, never in production. `-import-parental` opens a sealed file with
+the same key. A rollback to nx-baas (`pctl-rollback.json`) needs the records in clear: nx-baas
+refuses a sealed file and keeps its own.
 
 A parent's save is pushed to the console at once (`DID_CHANGE_PARENTAL_CONTROL_SETTING`)
 through the penne API's device messages — nx-penne, or nx-baas while it still serves Penne;
@@ -39,6 +57,8 @@ repository (`switch/native-switch-parental-controls-prd.md`,
 | `NX_API_ADDR` | `:20070` | plain HTTP: `/internal/pctl/*` and the console routes nx-baas forwards |
 | `NX_DATA` | `/data` | `pctl.json` |
 | `NX_PCTL_IMPORT` | | first start only: nx-baas's `baas.json`, to take the records from |
+| `NX_PCTL_BLOB_KEY` (or `_FILE`) | | **required**: 32 bytes, base64 (`openssl rand -base64 32`), seals `pctl.json` |
+| `NX_PCTL_BLOB_INSECURE_PLAINTEXT` | | `1`: start without a key, file in clear. Tests and development only |
 | `NX_CA_DIR` | `/data/ca` | `ca.pem`/`ca.key` that sign the listener's certificates |
 | `BAAS_SIGNING_KEY`, `BAAS_KID` | `/keys/baas_signing_key.pem` | verifies the console's dauth device token |
 | `WEBSITE_INTERNAL_URL` | | the parent's picture |

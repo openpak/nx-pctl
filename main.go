@@ -139,8 +139,12 @@ func main() {
 		log.Fatalf("%s NX_PENNE_URL or NX_CORE_URL is required (who delivers a parent's save to the console)", logPrefix)
 	}
 	data := getenv("NX_DATA", "/data")
+	sk, err := sealKeyFromEnv()
+	if err != nil {
+		log.Fatalf("%s %v", logPrefix, err)
+	}
 	s := &server{
-		store: openStore(data + "/pctl.json"),
+		store: openStore(data+"/pctl.json", sk),
 		key:   key,
 		idKid: getenv("BAAS_KID", "openpak-baas-key-1"),
 		penne: nxapi.New(penneURL),
@@ -159,11 +163,19 @@ func main() {
 }
 
 // openStore is the file store, or with NX_PCTL_BACKEND=parental the parental core with the
-// file as its mirror (parental.go). Unset is the file store, as before.
-func openStore(path string) *Store {
+// file as its mirror (parental.go). Unset is the file store, as before. With a key, files
+// still in clear are sealed first (seal.go); nil (the insecure opt-out) keeps them in clear.
+func openStore(path string, key *sealKey) *Store {
+	if key == nil {
+		log.Printf("%s NX_PCTL_BLOB_INSECURE_PLAINTEXT=1: %s is kept in clear, console PINs included (never in production)", logPrefix, path)
+	} else if n, err := sealAtRest(path, key); err != nil {
+		log.Fatalf("%s sealing %s: %v", logPrefix, path, err)
+	} else if n > 0 {
+		log.Printf("%s sealed %d file(s) kept in clear under key %s", logPrefix, n, key.id)
+	}
 	switch backend := os.Getenv("NX_PCTL_BACKEND"); backend {
 	case "":
-		return loadStore(path, os.Getenv("NX_PCTL_IMPORT"))
+		return loadStore(path, os.Getenv("NX_PCTL_IMPORT"), key)
 	case "parental":
 		if os.Getenv("NX_PCTL_IMPORT") != "" {
 			log.Printf("%s NX_PCTL_IMPORT is ignored with the parental backend; use -import-parental", logPrefix)
@@ -172,7 +184,7 @@ func openStore(path string) *Store {
 		if err != nil {
 			log.Fatalf("%s %v", logPrefix, err)
 		}
-		st, err := loadParentalStore(path, p)
+		st, err := loadParentalStore(path, p, key)
 		if err != nil {
 			log.Fatalf("%s %v", logPrefix, err)
 		}
@@ -186,18 +198,28 @@ func openStore(path string) *Store {
 
 // runImport is -import-parental: the one-shot copy into the parental core.
 func runImport(path string) int {
-	f, err := os.Open(path)
+	b, err := os.ReadFile(path)
 	if err != nil {
 		log.Printf("%s import: %v", logPrefix, err)
 		return 1
 	}
-	defer f.Close()
+	if isSealed(b) {
+		// A sealed pctl.json: the importer needs the same key the service runs with.
+		key, err := sealKeyFromEnv()
+		if err == nil {
+			b, err = openFile(key, b)
+		}
+		if err != nil {
+			log.Printf("%s import: %v", logPrefix, err)
+			return 1
+		}
+	}
 	p, err := dialParental()
 	if err != nil {
 		log.Printf("%s import: %v", logPrefix, err)
 		return 1
 	}
-	created, skipped, failed, err := importParental(f, p)
+	created, skipped, failed, err := importParental(bytes.NewReader(b), p)
 	log.Printf("%s import from %s: %d created, %d already held, %d refused", logPrefix, path, created, skipped, failed)
 	if err != nil {
 		log.Printf("%s import stopped: %v", logPrefix, err)
