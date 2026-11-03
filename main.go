@@ -30,6 +30,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/openpak/nx-common/httplog"
 	"github.com/openpak/nx-common/nxapi"
 	"github.com/openpak/nx-common/nxhttp"
 	"github.com/openpak/nx-common/nxjwt"
@@ -77,8 +78,12 @@ var debug = os.Getenv("NX_DEBUG") != ""
 
 // ServeHTTP answers the pctl hosts; any other host is misrouted and says so with a 421.
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	httplog.Wrap(logPrefix, httplog.Options{UserAgent: func(s string) string { return s }}, http.HandlerFunc(s.serve)).ServeHTTP(w, r)
+}
+
+// serve is ServeHTTP's body; ServeHTTP adds the access line (status, duration, never the query).
+func (s *server) serve(w http.ResponseWriter, r *http.Request) {
 	host := hostOf(r)
-	log.Printf("%s %s %s%s ua=%q", logPrefix, r.Method, host, r.URL.Path, r.UserAgent())
 	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if debug {
 		// No PIN in the log: parental controls carry one in both directions.
@@ -117,7 +122,7 @@ func (s *server) internalAPI() http.Handler {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"status": "ok", "service": "nx-pctl"})
 	})
-	return nxhttp.SplitListener(s, mux)
+	return nxhttp.SplitListener(s, httplog.Wrap(logPrefix, httplog.Options{UserAgent: func(s string) string { return s }}, mux))
 }
 
 func main() {

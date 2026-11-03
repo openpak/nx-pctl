@@ -1,5 +1,6 @@
 # github.com/openpak/nx-common v0.0.0 => ../nx-common
 ## explicit; go 1.26.0
+github.com/openpak/nx-common/httplog
 github.com/openpak/nx-common/internalkey
 github.com/openpak/nx-common/nxapi
 github.com/openpak/nx-common/nxhttp
