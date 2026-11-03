@@ -65,7 +65,10 @@ func dialParental() (*parentalSync, error) {
 	if addr == "" || key == "" {
 		return nil, errors.New("the parental backend needs NX_PARENTAL_ADDR and NX_PARENTAL_KEY (or _FILE)")
 	}
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// ListUsage answers a device's whole event history in one message; one production record
+	// came back as 5 MB and the 4 MB default refused it at start (2026-11-03).
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(64<<20)))
 	if err != nil {
 		return nil, err
 	}
