@@ -89,7 +89,7 @@ func TestFirstStartImportsTheRecordsFromBaasJSON(t *testing.T) {
 	os.WriteFile(baas, b, 0o600)
 
 	mine := filepath.Join(dir, "pctl.json")
-	s := loadStore(mine, baas)
+	s := loadStore(mine, baas, nil)
 	if got := s.PctlByMoonID(d.Hex()); got == nil || got.DauthID != "cert-aaaaaaaaaaaaaaaa" {
 		t.Fatalf("imported record = %+v", got)
 	}
@@ -102,7 +102,7 @@ func TestFirstStartImportsTheRecordsFromBaasJSON(t *testing.T) {
 	doc["users"] = map[string]any{"u2": map[string]any{"id": "u2"}}
 	b, _ = json.Marshal(doc)
 	os.WriteFile(baas, b, 0o600)
-	again := loadStore(mine, baas)
+	again := loadStore(mine, baas, nil)
 	if len(again.PctlDevicesFor("acct-other")) != 1 || again.PctlByMoonID(d.Hex()) == nil {
 		t.Fatal("a restart re-imported baas.json over our own file")
 	}
@@ -114,7 +114,7 @@ func TestFirstStartImportsTheRecordsFromBaasJSON(t *testing.T) {
 	json.Unmarshal(b, &doc)
 	b, _ = json.Marshal(doc)
 	os.WriteFile(baas, b, 0o600)
-	recut := loadStore(mine, baas)
+	recut := loadStore(mine, baas, nil)
 	if len(recut.PctlDevicesFor("acct-third")) != 1 {
 		t.Fatal("the second cut-over resumed from our stale records instead of nx-baas's")
 	}
@@ -125,7 +125,7 @@ func TestFirstStartImportsTheRecordsFromBaasJSON(t *testing.T) {
 
 // With no records left the file still carries the key, so a rollback can apply it.
 func TestNoRecordsIsStillAnObject(t *testing.T) {
-	s := loadStore(filepath.Join(t.TempDir(), "pctl.json"), "")
+	s := loadStore(filepath.Join(t.TempDir(), "pctl.json"), "", nil)
 	d := s.PctlNewPairing("a")
 	s.PctlUnlink(d.Hex())
 	b, _ := os.ReadFile(s.path)

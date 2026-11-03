@@ -12,6 +12,7 @@ import (
 	"image"
 	"image/jpeg"
 	"image/png"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1161,5 +1162,19 @@ func TestActivityNamesWhoPlayed(t *testing.T) {
 	who := titles[0]["players"].([]map[string]any)
 	if len(who) != 1 || who[0]["id"] != "10000000_00b20002_00000000_00000001" || who[0]["minutes"] != int64(13) {
 		t.Fatalf("players %v", who)
+	}
+}
+
+func TestLogsNeverCarryPairingCodesOrAccountIDs(t *testing.T) {
+	var buf strings.Builder
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	if got := redact("0123456789abcdef"); got != "...cdef" || redact("abc") != "****" {
+		t.Fatalf("redact: %q", got)
+	}
+	moonCall(t, "GET", "/moon/v1/devices?filter.links.pairingCode.code.$eq=SECRETCODE123")
+	if out := buf.String(); strings.Contains(out, "SECRETCODE123") {
+		t.Fatalf("pairing code in the log: %q", out)
 	}
 }

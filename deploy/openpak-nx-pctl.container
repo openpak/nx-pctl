@@ -21,6 +21,8 @@ Environment=NX_API_ADDR=:20070
 Environment=NX_DATA=/app/data
 Environment=NX_CA_DIR=/ca
 Environment=BAAS_SIGNING_KEY=/keys/baas_signing_key.pem
+# Required: seals pctl.json (console PINs) at rest. 32 bytes base64, in the shared .env as
+# NX_PCTL_BLOB_KEY; nx-pctl refuses to start without it.
 # First start only: with no /app/data/pctl.json yet, the records are taken out of nx-baas's
 # baas.json (only the pctlDevices key). Read-only, read once; drop the mount afterwards.
 Environment=NX_PCTL_IMPORT=/import/baas.json

@@ -1,0 +1,157 @@
+syntax = "proto3";
+
+package openpak.parental.v1;
+
+option go_package = "github.com/openpak/parental/proto/openpak/parental/v1;parentalv1";
+
+// The console-neutral parental-controls core (docs/design.md). Network adapters
+// call it with an adapter key in `x-internal-key`; the key names the adapter's
+// namespace, and every device call is scoped to it: a request never names its
+// own namespace.
+service Parental {
+  // Active supervisions where the account is the member or a supervisor.
+  rpc GetSupervision(GetSupervisionRequest) returns (GetSupervisionResponse);
+  // The member's neutral profile and the caller namespace's override.
+  rpc GetProfile(GetProfileRequest) returns (GetProfileResponse);
+
+  // Create (expected_version 0) or replace a device record. ABORTED on a
+  // version mismatch, or when 0 was given and the record exists;
+  // FAILED_PRECONDITION when a bound subject would change.
+  rpc PutDevice(PutDeviceRequest) returns (PutDeviceResponse);
+  rpc GetDevice(GetDeviceRequest) returns (Device);
+  // By the paired subject, or by a pairing code that is still live.
+  rpc FindDevice(FindDeviceRequest) returns (Device);
+  rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse);
+  // Removes the device with its supervisors and usage. ABORTED on a version
+  // mismatch; NOT_FOUND when it is already gone.
+  rpc DeleteDevice(DeleteDeviceRequest) returns (DeleteDeviceResponse);
+
+  // Play-time and state reports, deduplicated by the SHA-256 of each payload.
+  rpc IngestUsage(IngestUsageRequest) returns (IngestUsageResponse);
+  rpc ListUsage(ListUsageRequest) returns (ListUsageResponse);
+
+  // The parental_changed stream (docs/design.md section 4): the poll and its
+  // push form share one version order; deduplicate by event_id.
+  rpc PollEvents(PollEventsRequest) returns (PollEventsResponse);
+  rpc SubscribeEvents(SubscribeEventsRequest) returns (stream ParentalEvent);
+}
+
+message Supervision {
+  string member_id = 1;
+  string supervisor_id = 2;
+  string role = 3;  // owner | guardian
+  string state = 4; // pending | active (GetSupervision returns active only)
+}
+
+message GetSupervisionRequest { string account_id = 1; }
+
+message GetSupervisionResponse {
+  repeated Supervision supervised_by = 1; // the account is the member
+  repeated Supervision supervising = 2;   // the account is the supervisor
+}
+
+message GetProfileRequest { string member_id = 1; }
+
+message GetProfileResponse {
+  bool supervised = 1;           // at least one active supervisor
+  string profile_json = 2;       // the v1 profile document; "{}" when none was set
+  uint64 profile_version = 3;    // 0 when none was set
+  string override_json = 4;      // the caller namespace's override; "{}" when none
+  uint64 override_version = 5;
+}
+
+message Device {
+  string id = 1;                  // the core's id (UUID)
+  string device_ref = 2;          // the network's id for the record
+  string owner_id = 3;            // managing supervisor account
+  repeated string supervisor_ids = 4; // every supervisor, owner included
+  string subject = 5;             // the device identity once paired; empty before
+  string pairing_code = 6;        // empty when none
+  int64 pairing_expires_unix = 7;
+  int64 paired_at_unix = 8;
+  bytes state_json = 9;           // adapter-owned blob, a JSON object
+  uint64 version = 10;
+  int64 updated_at_unix = 11;
+}
+
+message PutDeviceRequest {
+  Device device = 1;              // id, version and updated_at are ignored
+  uint64 expected_version = 2;
+}
+
+message PutDeviceResponse { Device device = 1; }
+
+message GetDeviceRequest { string device_ref = 1; }
+
+message FindDeviceRequest {
+  oneof by {
+    string subject = 1;
+    string pairing_code = 2;
+  }
+}
+
+message ListDevicesRequest {
+  string supervisor_id = 1; // optional filter
+  string page_token = 2;    // the last device_ref of the previous page
+}
+
+message ListDevicesResponse {
+  repeated Device devices = 1;
+  string next_page_token = 2; // empty on the last page
+}
+
+message DeleteDeviceRequest {
+  string device_ref = 1;
+  uint64 expected_version = 2;
+}
+
+message DeleteDeviceResponse {}
+
+message UsageEvent {
+  bytes payload_json = 1;   // the event as the network sent it, kept byte for byte
+  string kind = 2;          // the network's event type, e.g. DID_APP_PLAY
+  int64 occurred_at_unix = 3; // 0 when the event carried no time
+  string member_id = 4;     // optional: the account that played, when known
+}
+
+message IngestUsageRequest {
+  string device_ref = 1;
+  repeated UsageEvent events = 2; // at most 1000 per call
+}
+
+message IngestUsageResponse {
+  int32 accepted = 1; // new events stored
+  int32 held = 2;     // events held for the device after pruning
+}
+
+message ListUsageRequest {
+  string device_ref = 1;
+  int64 since_unix = 2; // events that occurred at or after this; 0 = all
+  int32 limit = 3;      // capped at 5000
+}
+
+message ListUsageResponse { repeated UsageEvent events = 1; }
+
+message PollEventsRequest {
+  uint64 since_version = 1;
+  int32 limit = 2; // capped at 1000
+}
+
+message PollEventsResponse {
+  repeated ParentalEvent events = 1;
+  uint64 max_version = 2;
+}
+
+message SubscribeEventsRequest { uint64 since_version = 1; }
+
+message ParentalEvent {
+  uint64 version = 1;
+  string event_id = 2;
+  string type = 3;       // parental_changed
+  string scope = 4;      // supervision | profile | override | device
+  string account_id = 5; // the member, or the device owner
+  string namespace = 6;  // override and device
+  string subject_id = 7; // the other party, or the device_ref
+  string origin = 8;     // network:<namespace>, or the acting account id
+  int64 created_at_unix = 9;
+}
