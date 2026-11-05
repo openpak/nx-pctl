@@ -16,6 +16,7 @@ package main
 // later rotation can tell which key a file was sealed under.
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -159,4 +160,103 @@ func sealAtRest(path string, k *sealKey) (int, error) {
 		n++
 	}
 	return n, nil
+}
+
+// resealFile is the contents of a sealed file moved from oldK to newK. A file already under
+// newK is returned as it is (so an interrupted run can be repeated), one in clear is sealed
+// under newK, one under any other key is an error. The result is opened under newK before it
+// is returned.
+func resealFile(oldK, newK *sealKey, b []byte) (out []byte, how string, err error) {
+	if oldK == nil || newK == nil || oldK.id == newK.id {
+		return nil, "", errors.New("rekey needs an old and a new key that differ")
+	}
+	var plain []byte
+	switch {
+	case !isSealed(b):
+		plain, how = b, "sealed"
+	default:
+		var f sealedFile
+		if err := json.Unmarshal(b, &f); err != nil {
+			return nil, "", errors.New("the sealed file is corrupt")
+		}
+		switch f.KID {
+		case newK.id:
+			if _, err := openFile(newK, b); err != nil {
+				return nil, "", err
+			}
+			return b, "already-new", nil
+		case oldK.id:
+			if plain, err = openFile(oldK, b); err != nil {
+				return nil, "", err
+			}
+			how = "rekeyed"
+		default:
+			return nil, "", fmt.Errorf("sealed under key %s, which is neither the old (%s) nor the new (%s) key", f.KID, oldK.id, newK.id)
+		}
+	}
+	out = newK.seal(plain)
+	if got, err := openFile(newK, out); err != nil || !bytes.Equal(got, plain) {
+		return nil, "", errors.New("the re-sealed file does not open under the new key")
+	}
+	return out, how, nil
+}
+
+// rekeyAtRest moves pctl.json and the copies beside it from oldK to newK, each one written
+// to a temporary file and renamed, and returns the counts. Run it with the service stopped.
+func rekeyAtRest(path string, oldK, newK *sealKey) (rekeyed, already, sealed int, err error) {
+	backups, _ := filepath.Glob(path + ".before-*")
+	// Work out every result first, so a file that cannot be moved changes none.
+	type job struct {
+		p   string
+		out []byte
+	}
+	var jobs []job
+	for _, p := range append([]string{path}, backups...) {
+		b, rerr := os.ReadFile(p)
+		if errors.Is(rerr, os.ErrNotExist) {
+			continue
+		}
+		if rerr != nil {
+			return 0, 0, 0, rerr
+		}
+		out, how, rerr := resealFile(oldK, newK, b)
+		if rerr != nil {
+			return 0, 0, 0, fmt.Errorf("%s: %w", filepath.Base(p), rerr)
+		}
+		switch how {
+		case "already-new":
+			already++
+		case "sealed":
+			sealed++
+			jobs = append(jobs, job{p, out})
+		default:
+			rekeyed++
+			jobs = append(jobs, job{p, out})
+		}
+	}
+	for _, j := range jobs {
+		if err := os.WriteFile(j.p+".tmp", j.out, 0o600); err != nil {
+			return 0, 0, 0, err
+		}
+		if err := os.Rename(j.p+".tmp", j.p); err != nil {
+			return 0, 0, 0, err
+		}
+	}
+	return rekeyed, already, sealed, nil
+}
+
+// oldSealKeyFromEnv is NX_PCTL_BLOB_KEY_OLD (or the file NX_PCTL_BLOB_KEY_OLD_FILE names).
+func oldSealKeyFromEnv() (*sealKey, error) {
+	v := os.Getenv("NX_PCTL_BLOB_KEY_OLD")
+	if f := os.Getenv("NX_PCTL_BLOB_KEY_OLD_FILE"); f != "" {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return nil, fmt.Errorf("NX_PCTL_BLOB_KEY_OLD_FILE: %w", err)
+		}
+		v = string(b)
+	}
+	if strings.TrimSpace(v) == "" {
+		return nil, errors.New("NX_PCTL_BLOB_KEY_OLD (or _FILE) is required for -rekey")
+	}
+	return parseSealKey(v)
 }

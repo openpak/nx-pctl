@@ -155,3 +155,53 @@ func TestTheKeyIsRequiredUnlessPlaintextIsAskedFor(t *testing.T) {
 		t.Fatalf("a good key: %v", err)
 	}
 }
+
+func TestRekeyAtRestMovesPctlJSONAndCopies(t *testing.T) {
+	mk := func(b byte) *sealKey {
+		k, err := parseSealKey(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{b}, 32)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return k
+	}
+	oldK, newK := mk(1), mk(2)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pctl.json")
+	plain := []byte(`{"pctlDevices":{"1":{"unlockCode":"4826"}}}`)
+	os.WriteFile(path, oldK.seal(plain), 0o600)
+	os.WriteFile(path+".before-parental", oldK.seal(plain), 0o600)
+	os.WriteFile(path+".before-import-1", plain, 0o600) // still in clear
+
+	re, al, se, err := rekeyAtRest(path, oldK, newK)
+	if err != nil || re != 2 || al != 0 || se != 1 {
+		t.Fatalf("re=%d al=%d se=%d err=%v", re, al, se, err)
+	}
+	for _, p := range []string{path, path + ".before-parental", path + ".before-import-1"} {
+		b, _ := os.ReadFile(p)
+		if bytes.Contains(b, []byte("4826")) {
+			t.Fatalf("%s holds the PIN in clear", p)
+		}
+		got, err := openFile(newK, b)
+		if err != nil || !bytes.Equal(got, plain) {
+			t.Fatalf("%s does not open under the new key: %v", p, err)
+		}
+		if _, err := openFile(oldK, b); err == nil {
+			t.Fatalf("%s still opens under the old key", p)
+		}
+	}
+	re, al, se, err = rekeyAtRest(path, oldK, newK)
+	if err != nil || re != 0 || al != 3 || se != 0 {
+		t.Fatalf("second run re=%d al=%d se=%d err=%v", re, al, se, err)
+	}
+	// A copy under a third key stops the run before any file changes.
+	other := mk(3)
+	os.WriteFile(path, oldK.seal(plain), 0o600)
+	os.WriteFile(path+".before-x", other.seal(plain), 0o600)
+	before, _ := os.ReadFile(path)
+	if _, _, _, err := rekeyAtRest(path, oldK, newK); err == nil {
+		t.Fatal("a file under a third key must fail the run")
+	}
+	if after, _ := os.ReadFile(path); !bytes.Equal(before, after) {
+		t.Fatal("the failed run changed pctl.json")
+	}
+}

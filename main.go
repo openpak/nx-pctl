@@ -127,7 +127,11 @@ func (s *server) internalAPI() http.Handler {
 
 func main() {
 	importFrom := flag.String("import-parental", "", "copy the records of this pctl.json (or nx-baas's baas.json) into the parental core, then exit")
+	rekey := flag.Bool("rekey", false, "re-seal pctl.json and its copies from NX_PCTL_BLOB_KEY_OLD to NX_PCTL_BLOB_KEY, then exit (service stopped)")
 	flag.Parse()
+	if *rekey {
+		os.Exit(runRekey(getenv("NX_DATA", "/data") + "/pctl.json"))
+	}
 	if *importFrom != "" {
 		os.Exit(runImport(*importFrom))
 	}
@@ -199,6 +203,29 @@ func openStore(path string, key *sealKey) *Store {
 		log.Fatalf("%s NX_PCTL_BACKEND=%q: unset (file) or parental", logPrefix, backend)
 		return nil
 	}
+}
+
+// runRekey is -rekey: the one-shot key change for the sealed files. It prints counts only.
+func runRekey(path string) int {
+	oldK, err := oldSealKeyFromEnv()
+	var newK *sealKey
+	if err == nil {
+		newK, err = sealKeyFromEnv()
+		if err == nil && newK == nil {
+			err = errors.New("NX_PCTL_BLOB_KEY (the new key) is required for -rekey")
+		}
+	}
+	if err != nil {
+		log.Printf("%s rekey: %v", logPrefix, err)
+		return 1
+	}
+	rekeyed, already, sealed, err := rekeyAtRest(path, oldK, newK)
+	if err != nil {
+		log.Printf("%s rekey stopped, no file changed: %v", logPrefix, err)
+		return 1
+	}
+	log.Printf("%s rekey: %d file(s) re-sealed, %d already on the new key, %d sealed from clear", logPrefix, rekeyed, already, sealed)
+	return 0
 }
 
 // runImport is -import-parental: the one-shot copy into the parental core.

@@ -16,7 +16,7 @@
 | `WEBSITE_INTERNAL_URL` | | the parent's picture |
 | `PCTL_MOVIE` | | the explainer clip; 404 while unset |
 | `NX_DEBUG` | | log every request and reply (PINs masked) |
-| `NX_PCTL_BLOB_KEY` (or `_FILE`) | | **required**: 32 bytes, base64 (`openssl rand -base64 32`), seals `pctl.json` |
+| `NX_PCTL_BLOB_KEY` (or `_FILE`) | | **required**: 32 bytes, base64 (`openssl rand -base64 32`), seals `pctl.json`. To change it: stop the service, run `nx-pctl -rekey` once with `NX_PCTL_BLOB_KEY_OLD` set to the previous key, start the service on the new one |
 | `NX_PCTL_BLOB_INSECURE_PLAINTEXT` | | `1`: start without a key, file in clear. Tests and development only |
 | `NX_PCTL_BACKEND` | (unset: the file) | `parental`: keep the records in the parental core (below). **Off by default** |
 | `NX_PARENTAL_ADDR` | | the parental core's gRPC (`openpak-parental:20171`), with the backend on |
